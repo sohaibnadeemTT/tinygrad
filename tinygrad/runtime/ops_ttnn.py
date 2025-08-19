@@ -100,25 +100,38 @@ class TTNNDevice(Compiled):
         ttnn.synchronize_device(self.ttnn_device)
 
 class TTNNBuffer:
-    def __init__(self, size, ttnn_device):
+    def __init__(self, size, ttnn_device, dtype):
         self.size = size
         self.ttnn_device = ttnn_device
-        # Always allocate a TTNN tensor immediately
-        self._allocate_tensor()
-        
-    def _allocate_tensor(self):
-        """Allocate empty TTNN tensor for this buffer"""
-        if DEBUG >= 1:
-            print(f"TTNNBuffer: allocating TTNN tensor of size {self.size}")
-        
-        # Create torch tensor with zeros, then convert to TTNN
-        torch_tensor = torch.zeros(self.size, dtype=torch.uint8)
-        self._tensor = ttnn.from_torch(torch_tensor, device=self.ttnn_device)
+        self.dtype = dtype  # tinygrad DType
+        self._tensor = None  # Lazy allocation - create when we get actual data
         
         if DEBUG >= 1:
-            print(f"TTNNBuffer: successfully allocated TTNN tensor")
+            print(f"TTNNBuffer: created buffer of size {size} with dtype {dtype} (lazy allocation)")
+    
+    def _tinygrad_to_torch_dtype(self, tinygrad_dtype):
+        """Convert tinygrad DType to torch dtype"""
+        from tinygrad.dtype import dtypes
+        mapping = {
+            dtypes.float32: torch.float32,
+            dtypes.float16: torch.float16,
+            dtypes.bfloat16: torch.bfloat16,
+            dtypes.int32: torch.int32,
+            dtypes.int16: torch.int16,
+            dtypes.int8: torch.int8,
+            dtypes.uint8: torch.uint8,
+            dtypes.bool: torch.bool,
+        }
+        return mapping.get(tinygrad_dtype, torch.float32)
     
     def tensor(self):
+        if self._tensor is None:
+            # For output buffers that haven't received data yet, create a placeholder
+            torch_dtype = self._tinygrad_to_torch_dtype(self.dtype)
+            if DEBUG >= 1:
+                print(f"TTNNBuffer: creating placeholder tensor with dtype {self.dtype} -> {torch_dtype}")
+            torch_tensor = torch.zeros(self.size, dtype=torch_dtype)
+            self._tensor = ttnn.from_torch(torch_tensor, device=self.ttnn_device)
         return self._tensor
         
     def _free(self):
@@ -127,21 +140,28 @@ class TTNNBuffer:
             self._tensor = None
             
     def _from_buffer(self, buff: memoryview):
-        """Copy data from CPU buffer into existing TTNN tensor"""
+        """Copy data from CPU buffer into TTNN tensor"""
+        torch_dtype = self._tinygrad_to_torch_dtype(self.dtype)
+        
         if DEBUG >= 1:
             print(f"TTNNBuffer: copying {len(buff)} bytes from CPU to TTNN")
-            
-        # Create torch tensor from buffer
-        torch_tensor = torch.frombuffer(buff, dtype=torch.float32)
-        print(f"TTNNBuffer: torch_tensor: {torch_tensor}")
+            print(f"TTNNBuffer: tinygrad dtype: {self.dtype} -> torch dtype: {torch_dtype}")
+            print(f"TTNNBuffer: memoryview format: '{buff.format}', itemsize: {buff.itemsize}")
         
-        # Replace our existing tensor with new data
+        # Convert raw bytes to tensor with correct dtype
+        # memoryview format is always 'B' (raw bytes), but we know the logical dtype
+        torch_tensor = torch.frombuffer(buff, dtype=torch_dtype)
+        
+        if DEBUG >= 1:
+            print(f"TTNNBuffer: created torch_tensor: {torch_tensor} (dtype: {torch_tensor.dtype})")
+        
+        # Replace/create TTNN tensor
         if self._tensor is not None:
             ttnn.deallocate(self._tensor)
         self._tensor = ttnn.from_torch(torch_tensor, device=self.ttnn_device)
         
         if DEBUG >= 1:
-            print(f"TTNNBuffer: successfully copied data to TTNN tensor")
+            print(f"TTNNBuffer: successfully created TTNN tensor")
     
     def _to_device(self):
         """Copy data from TTNN tensor back to CPU memoryview"""
@@ -149,7 +169,8 @@ class TTNNBuffer:
             print(f"TTNNBuffer: copying TTNN tensor back to CPU")
             
         torch_tensor = ttnn.to_torch(self._tensor)
-        print(f"TTNNBuffer: torch_tensor: {torch_tensor}")
+        if DEBUG >= 1:
+            print(f"TTNNBuffer: torch_tensor from TTNN: {torch_tensor} (dtype: {torch_tensor.dtype})")
         return memoryview(torch_tensor.numpy())
 
 class TTNNAllocator(LRUAllocator):
@@ -157,7 +178,20 @@ class TTNNAllocator(LRUAllocator):
         super().__init__(device)
         
     def _alloc(self, size, options):
-        return TTNNBuffer(size, self.dev.ttnn_device)
+        # Get dtype from BufferSpec options
+        dtype = getattr(options, 'dtype', None)
+        
+        if DEBUG >= 1:
+            print(f"TTNNAllocator: allocating buffer with size {size}, dtype: {dtype}")
+        
+        if dtype is None:
+            # Fallback - should not happen with BufferSpec enhancement
+            from tinygrad.dtype import dtypes
+            dtype = dtypes.float32
+            if DEBUG >= 1:
+                print(f"TTNNAllocator: no dtype in options, using fallback {dtype}")
+        
+        return TTNNBuffer(size, self.dev.ttnn_device, dtype)
         
     def _free(self, buf, options):
         buf._free()
@@ -168,8 +202,16 @@ class TTNNAllocator(LRUAllocator):
     def _copyout(self, dest: memoryview, src):
         # Copy data from device buffer to dest memoryview
         device_data = src._to_device()
-        print(f"TTNNAllocator: _copyout: {device_data}")
+        if DEBUG >= 1:
+            print(f"TTNNAllocator: _copyout: {device_data}")
+            print(f"TTNNAllocator: dest format: '{dest.format}', device_data format: '{device_data.format}'")
         
-        # Cast dest to float32 to match device_data structure
-        dest_f32 = dest.cast('f')  # Cast to float32 format
-        dest_f32[:] = device_data
+        # Cast dest to match device_data structure for assignment
+        if dest.format != device_data.format:
+            if DEBUG >= 1:
+                print(f"TTNNAllocator: casting dest from '{dest.format}' to '{device_data.format}'")
+            dest_cast = dest.cast(device_data.format)
+            dest_cast[:] = device_data
+        else:
+            # Formats already match
+            dest[:] = device_data

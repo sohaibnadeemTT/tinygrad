@@ -68,7 +68,8 @@ class ProfileGraphEvent(ProfileEvent): ents:list[ProfileGraphEntry]; deps:list[l
 
 @dataclass(frozen=True, eq=True)
 class BufferSpec:
-  # TODO: move device, size, dtype here?
+  # TODO: move device, size here?
+  dtype: DType|None = None  # Enhanced: moved dtype here as suggested by TODO
   image: ImageDType|None = None
   uncached: bool = False
   cpu_access: bool = False
@@ -127,14 +128,21 @@ class Buffer:
     if MAX_BUFFER_SIZE > 0 and self.size > MAX_BUFFER_SIZE: raise RuntimeError(f"buffer of size {self.size/1e6:.2f}M is too large")
     self.allocator:Allocator = Device[self.device].allocator
     if external_ptr is not None:
-      self.options = replace(self.options, external_ptr=external_ptr) if self.options else BufferSpec(external_ptr=external_ptr)
+      self.options = replace(self.options, external_ptr=external_ptr, dtype=self.dtype) if self.options else BufferSpec(external_ptr=external_ptr, dtype=self.dtype)
     if self._base is not None:
       self._base.ensure_allocated()
       self._base.allocated_views += 1
       assert hasattr(self.allocator, "_offset"), "offset function required for view"
       self._buf: Any = self.allocator._offset(self.base._buf, self.nbytes, self.offset)
     else:
-      self._buf = opaque if opaque is not None else self.allocator.alloc(self.nbytes, self.options)
+      # Enhanced: pass dtype in BufferSpec options
+      if self.options is not None:
+        # Merge existing options with dtype
+        options_with_dtype = replace(self.options, dtype=self.dtype)
+      else:
+        # Create new BufferSpec with dtype
+        options_with_dtype = BufferSpec(dtype=self.dtype)
+      self._buf = opaque if opaque is not None else self.allocator.alloc(self.nbytes, options_with_dtype)
       if not self.device.startswith("DISK"): GlobalCounters.mem_used += self.nbytes
       if PROFILE:
         self._prof_num = num = len(Buffer.profile_events)

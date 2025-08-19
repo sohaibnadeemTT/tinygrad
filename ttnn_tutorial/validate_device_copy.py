@@ -5,7 +5,7 @@ Test to validate device copy flow in TTNN backend
 
 from tinygrad import Tensor, Device
 
-def test_device_copy_flow():
+def test_device_copy_flow_float32():
     """Test explicit device copy operations"""
     
     print("=" * 60)
@@ -33,6 +33,43 @@ def test_device_copy_flow():
     
     # Step 4: Verify data integrity  
     expected = [1.0, 2.0, 3.0]
+    print(f"   Expected: {expected}")
+    
+    if result == expected:
+        print("   ✓ Device copy flow PASSED!")
+        return True
+    else:
+        print("   ✗ Device copy flow FAILED!")
+        return False
+
+def test_device_copy_flow_int32():
+    """Test explicit device copy operations"""
+    
+    print("=" * 60)
+    print("Testing TTNN Device Copy Flow")
+    print("=" * 60)
+    
+    print(f"Current backend: {Device.DEFAULT}")
+    
+    # Step 1: Create tensor (should be lazy, no device copy yet)
+    print("\n1. Creating tensor (lazy, no device copy)...")
+    a = Tensor([1, 2, 3])
+    print(f"   Tensor created: device={a.device}")
+    print(f"   Tensor is_realized: {a.uop.is_realized}")  # Should be False
+    
+    # Step 2: Force realization without computation (just copy to device)
+    print("\n2. Forcing realization (copy to device)...")
+    a_realized = a.realize()
+    print(f"   Tensor is_realized: {a_realized.uop.is_realized}")  # Should be True
+    print(f"   Buffer allocated: {a_realized.uop.buffer.is_allocated()}")
+    
+    # Step 3: Copy back to host and verify data
+    print("\n3. Copying back to host...")
+    result = a_realized.tolist()
+    print(f"   Data copied back: {result}")
+    
+    # Step 4: Verify data integrity  
+    expected = [1, 2, 3]
     print(f"   Expected: {expected}")
     
     if result == expected:
@@ -89,15 +126,17 @@ if __name__ == "__main__":
     print("Testing TTNN backend device copy validation...")
     
     # Test 1: Basic device copy flow
-    test1_result = test_device_copy_flow()
+    test1_result = test_device_copy_flow_float32()
+    test2_result = test_device_copy_flow_int32()
     
     # Test 2: Buffer lifecycle  
-    test2_result = True #test_buffer_lifecycle()
+    test3_result = True #test_buffer_lifecycle()
     
     print("\n" + "=" * 60)
     print("Summary:")
     print(f"Device Copy Flow: {'PASSED' if test1_result else 'FAILED'}")
-    print(f"Buffer Lifecycle: {'PASSED' if test2_result else 'FAILED'}")
+    print(f"Device Copy Flow: {'PASSED' if test2_result else 'FAILED'}")
+    print(f"Buffer Lifecycle: {'PASSED' if test3_result else 'FAILED'}")
     print("=" * 60)
     
     if test1_result and test2_result:
