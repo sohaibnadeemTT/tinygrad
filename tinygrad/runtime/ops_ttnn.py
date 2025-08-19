@@ -169,4 +169,7 @@ class TTNNAllocator(LRUAllocator):
         # Copy data from device buffer to dest memoryview
         device_data = src._to_device()
         print(f"TTNNAllocator: _copyout: {device_data}")
-        dest[:] = device_data
+        
+        # Cast dest to float32 to match device_data structure
+        dest_f32 = dest.cast('f')  # Cast to float32 format
+        dest_f32[:] = device_data
