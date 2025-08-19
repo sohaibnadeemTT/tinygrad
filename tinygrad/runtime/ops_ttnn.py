@@ -132,7 +132,8 @@ class TTNNBuffer:
             print(f"TTNNBuffer: copying {len(buff)} bytes from CPU to TTNN")
             
         # Create torch tensor from buffer
-        torch_tensor = torch.frombuffer(buff, dtype=torch.uint8)
+        torch_tensor = torch.frombuffer(buff, dtype=torch.float32)
+        print(f"TTNNBuffer: torch_tensor: {torch_tensor}")
         
         # Replace our existing tensor with new data
         if self._tensor is not None:
@@ -148,6 +149,7 @@ class TTNNBuffer:
             print(f"TTNNBuffer: copying TTNN tensor back to CPU")
             
         torch_tensor = ttnn.to_torch(self._tensor)
+        print(f"TTNNBuffer: torch_tensor: {torch_tensor}")
         return memoryview(torch_tensor.numpy())
 
 class TTNNAllocator(LRUAllocator):
@@ -166,4 +168,5 @@ class TTNNAllocator(LRUAllocator):
     def _copyout(self, dest: memoryview, src):
         # Copy data from device buffer to dest memoryview
         device_data = src._to_device()
+        print(f"TTNNAllocator: _copyout: {device_data}")
         dest[:] = device_data
