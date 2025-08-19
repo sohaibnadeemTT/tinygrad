@@ -5,12 +5,19 @@ import ttnn
 # torch tensors for buffer management
 import torch
 
+# tinygrad imports
+from tinygrad.device import Compiled, Buffer, Allocator
+
 class TTNNDevice(Compiled):
     devices = []
     # Only support single device for now
     def __init__(self, device: str):
-        self.ttnn_device = ttnn.Device(device_id=int(device))
-        TTNNDevice.devices.append(self)
+        # Accept "TTNN" or "TTNN:0" etc.
+        if ":" in device:
+            device_id = int(device.split(":")[1])
+        else:
+            device_id = 0
+        self.ttnn_device = ttnn.open_device(device_id=device_id)
 
     def synchronize(self):
         ttnn.synchronize_device(self.ttnn_device)
@@ -43,3 +50,4 @@ class TTNNAllocator(Allocator['TTNNDevice']):
         dest._from_buffer(src)
     def _copyout(self, dest: memoryview, src):
         return src._to_device()
+
