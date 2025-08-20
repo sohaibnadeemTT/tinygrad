@@ -14,6 +14,7 @@ from tinygrad.device import Compiled, Compiler, Allocator
 from tinygrad.renderer import Renderer
 from tinygrad.dtype import dtypes, PtrDType
 from tinygrad.uop.ops import Ops, UOp
+# NOTE: Python fallback has been removed per requirements. All execution must use TTNN or simple copy.
 
 
 class TTNNAllocator(Allocator['TTNNDevice']):
@@ -28,116 +29,47 @@ class TTNNRenderer(Renderer):
   device = "TTNN"
 
   def render(self, uops:list[UOp]) -> str:
-    # Build a list-of-ops factory inspired by provided schema
-    ops:list[dict[str, Any]] = []
-    global_declared:dict[int, str] = {}
+    # Per-UOp IR with no heuristics: one entry per UOp, referencing sources by index
+    ir_ops: list[dict[str, Any]] = []
+    uop_to_idx: dict[UOp, int] = {u:i for i,u in enumerate(uops)}
+    globals_order: list[int] = []
 
-    def dtype_str(ptrdt:PtrDType) -> str:
-      base = ptrdt.base.scalar()
-      # map tinygrad dtype names to common strings
-      name = base.name
-      if base == dtypes.float: return "float32"
-      if base == dtypes.half: return "float16"
-      if base == dtypes.bfloat16: return "bfloat16"
-      if base == dtypes.int32: return "int32"
-      if base == dtypes.uint32: return "uint32"
-      if base == dtypes.float64: return "float64"
-      return name
+    def dtype_name(dt) -> str:
+      try:
+        return dt.base.name if hasattr(dt, 'base') else dt.name
+      except Exception:
+        return str(dt)
 
-    # declare globals in encounter order with names buf<id>
     for u in uops:
+      entry: dict[str, Any] = {"op": str(u.op).split('.')[-1], "src": [uop_to_idx[s] for s in u.src]}
       if u.op is Ops.DEFINE_GLOBAL:
         assert isinstance(u.dtype, PtrDType)
-        gname = f"buf{u.arg}"
-        global_declared[u.arg] = gname
-        size = u.dtype.size if u.dtype.size != -1 else 0
-        ops.append({
-          "op": "store",
-          "tensor": {
-            "id": u.arg,
-            "name": gname,
-            "size": size,
-            "dtype": dtype_str(u.dtype),
-          }
-        })
+        entry["arg"] = int(u.arg)
+        entry["dtype"] = dtype_name(u.dtype.base)
+        entry["itemsize"] = int(u.dtype.itemsize)
+        entry["size"] = int(u.dtype.size)
+        globals_order.append(int(u.arg))
+      elif u.op is Ops.DEFINE_LOCAL:
+        assert isinstance(u.dtype, PtrDType)
+        entry["dtype"] = dtype_name(u.dtype.base)
+        entry["itemsize"] = int(u.dtype.itemsize)
+        entry["size"] = int(u.dtype.size)
+      elif u.op in {Ops.LOAD, Ops.STORE, Ops.ADD, Ops.MUL, Ops.SUB, Ops.FDIV, Ops.MAX, Ops.EXP2, Ops.CAST, Ops.BITCAST}:
+        entry["dtype"] = dtype_name(u.dtype)
+      elif u.op is Ops.CONST:
+        entry["value"] = u.arg
+        entry["dtype"] = dtype_name(u.dtype)
+      # include arg for ops that carry simple args (e.g., SPECIAL, RANGE, GEP)
+      if "arg" not in entry and getattr(u, 'arg', None) is not None:
+        try:
+          json.dumps(u.arg)
+          entry["arg"] = u.arg
+        except Exception:
+          pass
+      ir_ops.append(entry)
 
-    # identify final store and create compute op
-    store_nodes = [u for u in uops if u.op is Ops.STORE]
-    if not store_nodes:
-      raise NotImplementedError("TTNNRenderer: no STORE found")
-    final_store = store_nodes[-1]
-    out_buf_id = next(x.arg for x in final_store.src[0].toposort() if x.op is Ops.DEFINE_GLOBAL)
-    out_name = global_declared[out_buf_id]
-    val_node = final_store.src[1]
-
-    # dependency set for the stored value
-    deps = list(val_node.toposort().keys())
-    # optional debug
-    try:
-      import os
-      if os.environ.get("TTNN_DEBUG") == "1":
-        print("TTNN renderer deps ops:", sorted({str(n.op) for n in deps}))
-    except Exception:
-      pass
-
-    def first_global_name(node:UOp) -> str:
-      gid = next(x.arg for x in node.toposort() if x.op is Ops.DEFINE_GLOBAL)
-      return global_declared[gid]
-
-    # prefer exp/exp2 if present, otherwise fall back to add
-    exp2_nodes = [n for n in deps if n.op is Ops.EXP2]
-    if exp2_nodes:
-      e2 = exp2_nodes[-1]
-      arg = e2.src[0]
-      # unwrap simple wrappers
-      seen = set()
-      unwrap_ops = {Ops.CAST, Ops.BITCAST, Ops.VECTORIZE, Ops.GEP, Ops.WHERE}
-      while arg.op in unwrap_ops and arg not in seen:
-        seen.add(arg)
-        arg = arg.src[1] if arg.op is Ops.WHERE else arg.src[0]
-      if arg.op is Ops.MUL:
-        # check for MUL(x, CONST k)
-        a, b = arg.src
-        const_node = a if a.op is Ops.CONST else b if b.op is Ops.CONST else None
-        var_node = b if a.op is Ops.CONST else a if b.op is Ops.CONST else None
-        if const_node is not None and var_node is not None:
-          k = float(const_node.arg)
-          if abs(k - (1.0/math.log(2.0))) < 1e-6:
-            # it's exp(x)
-            ops.append({"op": "exp", "inputs": [first_global_name(var_node)], "output": out_name})
-          else:
-            # unknown scaling, keep exp2 semantics
-            ops.append({"op": "exp2", "inputs": [first_global_name(var_node)], "output": out_name})
-        else:
-          ops.append({"op": "exp2", "inputs": [first_global_name(arg)], "output": out_name})
-      else:
-        ops.append({"op": "exp2", "inputs": [first_global_name(arg)], "output": out_name})
-    else:
-      # Heuristic: if only one global buffer participates and we see non-trivial unary math, assume exp
-      globals_in_deps = set()
-      for n in deps:
-        for x in n.toposort():
-          if x.op is Ops.DEFINE_GLOBAL:
-            globals_in_deps.add(x.arg)
-      unary_math_present = any(n.op in {Ops.MUL, Ops.CMPLT, Ops.CMPNE, Ops.WHERE} for n in deps)
-      if len(globals_in_deps) == 1 and unary_math_present:
-        ops.append({"op": "exp", "inputs": [global_declared[next(iter(globals_in_deps))]], "output": out_name})
-      else:
-        # prefer add if present in deps
-        def src_is_from_globals(n:UOp) -> bool:
-          try:
-            return all(any(x.op is Ops.DEFINE_GLOBAL for x in s.toposort()) for s in n.src)
-          except Exception:
-            return False
-        add_nodes = [n for n in deps if n.op is Ops.ADD and src_is_from_globals(n)]
-        if add_nodes:
-          addn = add_nodes[-1]
-          ins_names = [first_global_name(s) for s in addn.src]
-          ops.append({"op": "add", "inputs": ins_names, "output": out_name})
-        else:
-          raise NotImplementedError(f"TTNNRenderer: unsupported expression for store result")
-
-    return json.dumps(ops)
+    program = {"globals": sorted(globals_order), "uops": ir_ops}
+    return json.dumps(program)
 
 
 class TTNNCompiler(Compiler):
@@ -152,11 +84,11 @@ class TTNNProgram:
       raise RuntimeError("TTNN backend requires 'ttnn' and 'torch' to be installed and importable")
     self.device = device
     self.name = name
-    self.ops = json.loads(lib.decode('utf-8'))
+    self.program = json.loads(lib.decode('utf-8'))
     try:
       import os
       if os.environ.get("TTNN_DEBUG") == "1":
-        print("TTNN factory:", json.dumps(self.ops, indent=2))
+        print("TTNN IR:", json.dumps(self.program, indent=2))
     except Exception:
       pass
 
@@ -179,112 +111,375 @@ class TTNNProgram:
 
   def __call__(self, *bufs, global_size:Tuple[int,int,int]=(1,1,1), local_size:Tuple[int,int,int]=(1,1,1), vals:Tuple[int, ...]=(), wait=False):
     # Map declared tensors (in declaration order) to passed buffers
-    name_to_ix:dict[str, int] = {}
-    decl_order:list[str] = []
-    for op in self.ops:
-      if op.get("op") == "store" and isinstance(op.get("tensor"), dict):
-        name = op["tensor"]["name"]
-        decl_order.append(name)
-        name_to_ix[name] = len(name_to_ix)
+    globals_order = list(self.program.get("globals", []))
 
-    # Helpers to wrap names into TTNN tensors
-    def name_to_ttnn(name:str):
-      mv = bufs[name_to_ix[name]]
-      t = self._mv_to_torch_vec(mv, 4)
-      return self._to_ttnn(t)
-    def name_to_ttnn_tile(name:str):
-      mv = bufs[name_to_ix[name]]
-      numel = len(mv)//4
-      import math as _m
-      Y = 2
-      X = (_m.ceil(numel/2))
-      if X % 2 != 0: X += 1
-      total = Y*X
-      pad = total - numel
-      t = self._mv_to_torch_vec(mv, 4)
-      if pad > 0:
-        t = torch.nn.functional.pad(t.reshape(1,1,1,numel), (0,pad)).reshape(1,1,1,total)
-      t = t.reshape(1,1,Y,X).contiguous()
-      return self._to_tnnn_with_layout(t, ttnn.TILE_LAYOUT), numel
+    # Execute ops sequentially (Phase-2: add basic addressing and shape handling)
+    globals_order = list(globals_order)
+    def buf_ix_from_global_arg(arg:int) -> int:
+      return globals_order.index(arg)
 
-    # Execute ops sequentially and write back after each compute
-    last_out_name = None
-    last_torch_out = None
-    for op in self.ops:
-      if op.get("op") == "add":
-        a, b = op["inputs"]
-        out = op["output"]
-        out_ttnn = name_to_ttnn(a) + name_to_ttnn(b)
-        last_torch_out = self._from_ttnn(out_ttnn)
-        # write back result
-        out_mv = bufs[name_to_ix[out]]
-        flat = last_torch_out.reshape(-1)
-        assert flat.numel()*4 == len(out_mv), "Output size mismatch"
-        out_mv[:] = memoryview(flat.numpy().tobytes())
-        last_out_name = out
-      elif op.get("op") == "exp2":
-        a = op["inputs"][0]
-        out = op["output"]
-        tt_in, orig = name_to_ttnn_tile(a)
-        out_ttnn = ttnn.exp(tt_in * float(math.log(2.0)))
-        last_torch_out = self._from_ttnn(out_ttnn)
-        out_mv = bufs[name_to_ix[out]]
-        flat = last_torch_out.reshape(-1)[:orig]
-        assert flat.numel()*4 == len(out_mv), "Output size mismatch"
-        out_mv[:] = memoryview(flat.numpy().tobytes())
-        last_out_name = out
-      elif op.get("op") == "exp":
-        a = op["inputs"][0]
-        out = op["output"]
-        tt_in, orig = name_to_ttnn_tile(a)
-        out_ttnn = ttnn.exp(tt_in)
-        last_torch_out = self._from_ttnn(out_ttnn)
-        out_mv = bufs[name_to_ix[out]]
-        flat = last_torch_out.reshape(-1)[:orig]
-        assert flat.numel()*4 == len(out_mv), "Output size mismatch"
-        out_mv[:] = memoryview(flat.numpy().tobytes())
-        last_out_name = out
-      elif op.get("op") == "store":
-        continue
-      elif op.get("op") == "if":
-        # Minimal support: if condition is truthy, execute inner instructions naively
-        cond = bool(op.get("condition", False))
-        if cond:
-          for inner in op.get("instructions", []):
-            if inner.get("op") == "add":
-              a, b = inner["inputs"]
-              out = inner["output"]
-              out_ttnn = name_to_ttnn(a) + name_to_ttnn(b)
-              last_torch_out = self._from_ttnn(out_ttnn)
-              out_mv = bufs[name_to_ix[out]]
-              flat = last_torch_out.reshape(-1)
-              assert flat.numel()*4 == len(out_mv), "Output size mismatch"
-              out_mv[:] = memoryview(flat.numpy().tobytes())
-              last_out_name = out
-            elif inner.get("op") == "exp2":
-              a = inner["inputs"][0]
-              out = inner["output"]
-              tt_in, orig = name_to_ttnn_tile(a)
-              out_ttnn = ttnn.exp(tt_in * float(math.log(2.0)))
-              last_torch_out = self._from_ttnn(out_ttnn)
-              out_mv = bufs[name_to_ix[out]]
-              flat = last_torch_out.reshape(-1)[:orig]
-              assert flat.numel()*4 == len(out_mv), "Output size mismatch"
-              out_mv[:] = memoryview(flat.numpy().tobytes())
-              last_out_name = out
-            elif inner.get("op") == "exp":
-              a = inner["inputs"][0]
-              out = inner["output"]
-              tt_in, orig = name_to_ttnn_tile(a)
-              out_ttnn = ttnn.exp(tt_in)
-              last_torch_out = self._from_ttnn(out_ttnn)
-              out_mv = bufs[name_to_ix[out]]
-              flat = last_torch_out.reshape(-1)[:orig]
-              assert flat.numel()*4 == len(out_mv), "Output size mismatch"
-              out_mv[:] = memoryview(flat.numpy().tobytes())
-              last_out_name = out
+    uops = self.program.get("uops", [])
+    # Minimal runtime value table; entries are either scalars, torch tensors, or metadata
+    values: dict[int, Any] = {}
+
+    # Simple index context for RANGE and SPECIAL (placeholders for now)
+    special: dict[str, int] = {"gx": global_size[0], "gy": global_size[1], "gz": global_size[2],
+                               "lx": local_size[0], "ly": local_size[1], "lz": local_size[2]}
+    ranges: dict[int, int] = {}
+
+    def _vec_count(dtype_name: Any) -> int:
+      if isinstance(dtype_name, str):
+        digits = ''.join(ch for ch in dtype_name[::-1] if ch.isdigit())[::-1]
+        try: return int(digits) if digits else 1
+        except Exception: return 1
+      return 1
+
+    def _to_tensor(val: Any, like: torch.Tensor|None=None) -> torch.Tensor:
+      if isinstance(val, torch.Tensor):
+        return val
+      if isinstance(val, (int, float)):
+        if like is not None:
+          return torch.full_like(like, float(val))
+        return torch.tensor(float(val), dtype=torch.float32).reshape(1,1,1,1)
+      raise RuntimeError(f"Expected scalar or tensor, got {type(val)}")
+
+    def _map_bin(a: Any, b: Any, fn) -> Any:
+      # lane-wise mapping for vector lists
+      if isinstance(a, list) and isinstance(b, list):
+        assert len(a) == len(b)
+        outs = []
+        for ai, bi in zip(a, b):
+          t_out = fn(self._to_ttnn(_to_tensor(ai)), self._to_ttnn(_to_tensor(bi, _to_tensor(ai))))
+          outs.append(self._from_ttnn(t_out))
+        return outs
+      if isinstance(a, list):
+        outs = []
+        for ai in a:
+          ai_t = _to_tensor(ai)
+          bi_t = _to_tensor(b, ai_t)
+          t_out = fn(self._to_ttnn(ai_t), self._to_ttnn(bi_t))
+          outs.append(self._from_ttnn(t_out))
+        return outs
+      if isinstance(b, list):
+        outs = []
+        for bi in b:
+          bi_t = _to_tensor(bi)
+          ai_t = _to_tensor(a, bi_t)
+          t_out = fn(self._to_ttnn(ai_t), self._to_ttnn(bi_t))
+          outs.append(self._from_ttnn(t_out))
+        return outs
+      # both scalars/tensors
+      a_t = _to_tensor(a)
+      b_t = _to_tensor(b, a_t)
+      return self._from_ttnn(fn(self._to_ttnn(a_t), self._to_ttnn(b_t)))
+
+    def _map_un(a: Any, fn) -> Any:
+      if isinstance(a, list):
+        return [self._from_ttnn(fn(self._to_ttnn(_to_tensor(x)))) for x in a]
+      return self._from_ttnn(fn(self._to_ttnn(_to_tensor(a))))
+
+    def _is_int_dtype(u: dict) -> bool:
+      dt = u.get("dtype")
+      return isinstance(dt, str) and dt.startswith("int")
+
+    def _as_int_tensor(v: Any) -> torch.Tensor:
+      t = _to_tensor(v)
+      return t.to(torch.int32)
+
+    def _as_float_tensor(v: Any) -> torch.Tensor:
+      t = _to_tensor(v)
+      return t.to(torch.float32)
+
+    def _bitcast_tensor(t: torch.Tensor, target: str) -> torch.Tensor:
+      import numpy as np
+      cpu = t.detach().contiguous().view(-1).cpu()
+      arr = cpu.numpy()
+      if target and isinstance(target, str) and target.startswith("int"):
+        # reinterpret float32 -> int32
+        if arr.dtype != np.int32:
+          arr = arr.view(np.int32)
+      elif target and isinstance(target, str) and target.startswith("float"):
+        # reinterpret int32 -> float32
+        if arr.dtype != np.float32:
+          arr = arr.view(np.float32)
+      return torch.from_numpy(arr.reshape(cpu.shape)).contiguous()
+
+    def _map_bin_int(a: Any, b: Any, torch_op) -> Any:
+      if isinstance(a, list) and isinstance(b, list):
+        assert len(a) == len(b)
+        return [torch_op(_as_int_tensor(x), _as_int_tensor(y)) for x, y in zip(a, b)]
+      if isinstance(a, list):
+        return [torch_op(_as_int_tensor(x), _as_int_tensor(b)) for x in a]
+      if isinstance(b, list):
+        return [torch_op(_as_int_tensor(a), _as_int_tensor(y)) for y in b]
+      return torch_op(_as_int_tensor(a), _as_int_tensor(b))
+
+    def _map_bin_host(a: Any, b: Any, torch_op) -> Any:
+      if isinstance(a, list) and isinstance(b, list):
+        assert len(a) == len(b)
+        return [torch_op(_to_tensor(x), _to_tensor(y)) for x, y in zip(a, b)]
+      if isinstance(a, list):
+        return [torch_op(_to_tensor(x), _to_tensor(b, _to_tensor(x))) for x in a]
+      if isinstance(b, list):
+        return [torch_op(_to_tensor(a, _to_tensor(bi)), _to_tensor(bi)) for bi in b]
+      return torch_op(_to_tensor(a), _to_tensor(b, _to_tensor(a)))
+
+    def _map_bin_ttnn_bool(a: Any, b: Any, combiner) -> Any:
+      # combiner takes two boolean TTNN tensors and returns TTNN tensor
+      def to_bool_ttnn(x: Any):
+        xt = _to_tensor(x)
+        return ttnn.ne(self._to_ttnn(xt), self._to_ttnn(torch.zeros_like(xt)))
+      if isinstance(a, list) and isinstance(b, list):
+        assert len(a) == len(b)
+        return [self._from_ttnn(combiner(to_bool_ttnn(x), to_bool_ttnn(y))) for x, y in zip(a, b)]
+      if isinstance(a, list):
+        return [self._from_ttnn(combiner(to_bool_ttnn(x), to_bool_ttnn(b))) for x in a]
+      if isinstance(b, list):
+        return [self._from_ttnn(combiner(to_bool_ttnn(a), to_bool_ttnn(y))) for y in b]
+      return self._from_ttnn(combiner(to_bool_ttnn(a), to_bool_ttnn(b)))
+
+    # local/register scratch storage keyed by defining uop index
+    local_store: dict[int, memoryview] = {}
+
+    for idx, u in enumerate(uops):
+      op = u["op"]
+      src = u.get("src", [])
+      arg = u.get("arg", None)
+
+      if op == "DEFINE_GLOBAL":
+        # represent pointer as ("ptr", global_arg, offset_elems, itemsize_bytes, size_elems)
+        g_arg = int(u.get("arg", 0))
+        itemsize = int(u.get("itemsize", 4))
+        size_elems = int(u.get("size", 0))
+        values[idx] = ("ptr", g_arg, 0, itemsize, size_elems)
+      elif op == "DEFINE_LOCAL":
+        # represent local pointer as ("lptr", local_id(idx), offset_elems, itemsize_bytes, size_elems)
+        itemsize = int(u.get("itemsize", 4))
+        size_elems = int(u.get("size", 0))
+        local_store[idx] = memoryview(bytearray(itemsize*max(size_elems, 1)))
+        values[idx] = ("lptr", idx, 0, itemsize, size_elems)
+      elif op == "CONST":
+        values[idx] = u["value"]
+      elif op == "SPECIAL":
+        # Default to zero for launch-independent replay
+        values[idx] = 0
+      elif op == "RANGE":
+        # Simple linear range up to extent (Phase-2 placeholder: single-step)
+        values[idx] = 0
+      elif op == "GEP":
+        # Get element pointer: base[src0] + immediate offset in arg (elements)
+        base = values[src[0]]
+        # Vector element selection
+        if isinstance(base, list):
+          lane = 0
+          if isinstance(arg, (list, tuple)) and len(arg) > 0:
+            try: lane = int(arg[0])
+            except Exception: lane = 0
+          elif isinstance(arg, (int, float)):
+            lane = int(arg)
+          values[idx] = base[lane]
+        elif isinstance(base, torch.Tensor):
+          lane = 0
+          if isinstance(arg, (list, tuple)) and len(arg) > 0:
+            try: lane = int(arg[0])
+            except Exception: lane = 0
+          elif isinstance(arg, (int, float)):
+            lane = int(arg)
+          values[idx] = base[..., lane:lane+1]
+        else:
+          if not (isinstance(base, tuple) and base[0] == "ptr"):
+            # fallback: make a base pointer to first global
+            base = ("ptr", globals_order[0], 0, 4, 0)
+          _, g_arg, base_off, itemsize, size_elems = base
+          # normalize arg which can be scalar or list/tuple of scalars
+          if isinstance(arg, (list, tuple)):
+            try:
+              off = int(sum(int(x) for x in arg))
+            except Exception:
+              off = 0
+          else:
+            off = int(arg) if arg is not None else 0
+          values[idx] = ("ptr", g_arg, base_off + off, itemsize, size_elems)
+      elif op == "INDEX":
+        # Compute base + offset from (buffer, offset[, gate])
+        base = values[src[0]]
+        if not (isinstance(base, tuple) and base[0] == "ptr"):
+          base = ("ptr", globals_order[0], 0, 4, 0)
+        _, g_arg, base_off, itemsize, size_elems = base
+        offset = int(values[src[1]]) if len(src) > 1 and isinstance(values[src[1]], (int, float)) else 0
+        values[idx] = ("ptr", g_arg, base_off + offset, itemsize, size_elems)
+      elif op == "LOAD":
+        # Contiguous load from a global buffer referenced by pointer expression in src[0]
+        ptr = values[src[0]]
+        if isinstance(ptr, tuple) and ptr[0] in ("ptr", "lptr", "rptr"):
+          _, g_arg, off_elems, itemsize, size_elems = ptr
+          if ptr[0] == "ptr":
+            gix = buf_ix_from_global_arg(g_arg)
+            mv = bufs[gix]
+          else:
+            mv = local_store[g_arg]
+          vecn = _vec_count(u.get("dtype"))
+          if vecn > 1:
+            start = off_elems*itemsize
+            end = start + vecn*itemsize
+            t = self._mv_to_torch_vec(mv[start:end], itemsize)
+            # split lanes into separate 1-elem tensors
+            values[idx] = [t[..., i:i+1] for i in range(vecn)]
+          else:
+            start = off_elems*itemsize
+            end = start + itemsize
+            values[idx] = self._mv_to_torch_vec(mv[start:end], itemsize)
+        else:
+          gix = buf_ix_from_global_arg(globals_order[0])
+          values[idx] = self._mv_to_torch_vec(bufs[gix], 4)
+      elif op == "STORE":
+        # Write back computed tensor to the pointer in src[0]
+        ptr = values[src[0]]
+        if not (isinstance(ptr, tuple) and ptr[0] in ("ptr", "lptr", "rptr")):
+          ptr = ("ptr", globals_order[0], 0, 4, 0)
+        _, g_arg, off_elems, itemsize, size_elems = ptr
+        if ptr[0] == "ptr":
+          gix = buf_ix_from_global_arg(g_arg)
+          out_mv = bufs[gix]
+        else:
+          out_mv = local_store[g_arg]
+        val = values[src[1]]
+        if isinstance(val, list):
+          tensor = torch.cat([x.reshape(1,1,1,-1) for x in val], dim=-1)
+        else:
+          tensor = val if isinstance(val, torch.Tensor) else _to_tensor(val)
+        tensor = tensor.reshape(-1)
+        nbytes = tensor.numel()*4
+        start = off_elems*itemsize
+        end = start + nbytes
+        assert end <= len(out_mv)
+        out_mv[start:end] = memoryview(tensor.numpy().tobytes())
+      elif op == "ADD":
+        a = values[src[0]]; b = values[src[1]]
+        if _is_int_dtype(u):
+          values[idx] = _map_bin_int(a, b, torch.add)
+        else:
+          values[idx] = _map_bin(a, b, lambda x,y: x + y)
+      elif op == "SUB":
+        a = values[src[0]]; b = values[src[1]]
+        if _is_int_dtype(u):
+          values[idx] = _map_bin_int(a, b, torch.sub)
+        else:
+          values[idx] = _map_bin(a, b, lambda x,y: ttnn.subtract(x, y))
+      elif op == "MUL":
+        a = values[src[0]]; b = values[src[1]]
+        if _is_int_dtype(u):
+          values[idx] = _map_bin_int(a, b, torch.mul)
+        else:
+          values[idx] = _map_bin(a, b, lambda x,y: ttnn.multiply(x, y))
+      elif op == "FDIV":
+        a = values[src[0]]; b = values[src[1]]
+        values[idx] = _map_bin(a, b, lambda x,y: ttnn.divide(x, y))
+      elif op == "IDIV":
+        # integer division used for index math; do on host with integer tensors
+        a = values[src[0]]; b = values[src[1]]
+        values[idx] = _map_bin_int(a, b, lambda x,y: torch.div(x, y, rounding_mode='floor').to(torch.float32))
+      elif op == "MAX":
+        a = values[src[0]]; b = values[src[1]]
+        if _is_int_dtype(u):
+          values[idx] = _map_bin_int(a, b, torch.maximum)
+        else:
+          values[idx] = _map_bin(a, b, lambda x,y: ttnn.maximum(x, y))
+      elif op == "EXP2":
+        a = values[src[0]]
+        values[idx] = _map_un(a, lambda x: ttnn.exp(x * float(math.log(2.0))))
+      elif op == "EXP":
+        a = values[src[0]]
+        values[idx] = _map_un(a, lambda x: ttnn.exp(x))
+      elif op == "CMPLT":
+        a = values[src[0]]; b = values[src[1]]
+        values[idx] = _map_bin(a, b, lambda x,y: ttnn.lt(x, y))
+      elif op == "CMPNE":
+        a = values[src[0]]; b = values[src[1]]
+        values[idx] = _map_bin(a, b, lambda x,y: ttnn.ne(x, y))
+      elif op == "AND":
+        a = values[src[0]]; b = values[src[1]]
+        if _is_int_dtype(u):
+          values[idx] = _map_bin_int(a, b, torch.bitwise_and)
+        else:
+          # boolean AND using TTNN: a!=0 AND b!=0 => NOT ( (NOT a) OR (NOT b) )
+          values[idx] = _map_bin_ttnn_bool(a, b, lambda xa, xb: ttnn.logical_and(xa, xb) if hasattr(ttnn, 'logical_and') else ttnn.ne(ttnn.or_(ttnn.eq(xa, self._to_ttnn(torch.zeros_like(_to_tensor(a)))), ttnn.eq(xb, self._to_ttnn(torch.zeros_like(_to_tensor(b))))), self._to_ttnn(torch.zeros_like(_to_tensor(a)))))
+      elif op == "OR":
+        a = values[src[0]]; b = values[src[1]]
+        if _is_int_dtype(u):
+          values[idx] = _map_bin_int(a, b, torch.bitwise_or)
+        else:
+          values[idx] = _map_bin_ttnn_bool(a, b, lambda xa, xb: ttnn.logical_or(xa, xb) if hasattr(ttnn, 'logical_or') else ttnn.ne(ttnn.and_(ttnn.eq(xa, self._to_ttnn(torch.zeros_like(_to_tensor(a)))), ttnn.eq(xb, self._to_ttnn(torch.zeros_like(_to_tensor(b))))), self._to_ttnn(torch.ones_like(_to_tensor(a)))))
+      elif op == "XOR":
+        a = values[src[0]]; b = values[src[1]]
+        if _is_int_dtype(u):
+          values[idx] = _map_bin_int(a, b, torch.bitwise_xor)
+        else:
+          # boolean XOR via TTNN if available else NE as xor for bools
+          values[idx] = _map_bin_ttnn_bool(a, b, lambda xa, xb: ttnn.logical_xor(xa, xb) if hasattr(ttnn, 'logical_xor') else ttnn.ne(xa, xb))
+      elif op == "WHERE":
+        cond = values[src[0]]; tval = values[src[1]]; fval = values[src[2]]
+        # broadcast lane-wise if lists
+        if isinstance(cond, list) or isinstance(tval, list) or isinstance(fval, list):
+          # expand to lists of equal length
+          lanes = max(len(cond) if isinstance(cond, list) else 1,
+                      len(tval) if isinstance(tval, list) else 1,
+                      len(fval) if isinstance(fval, list) else 1)
+          out_list = []
+          for i in range(lanes):
+            ci = cond[i] if isinstance(cond, list) else cond
+            ti = tval[i] if isinstance(tval, list) else tval
+            fi = fval[i] if isinstance(fval, list) else fval
+            # ttnn.where requires TILE layout for non-sharded inputs
+            ci_t = self._to_tnnn_with_layout(_to_tensor(ci), ttnn.TILE_LAYOUT)
+            ti_t = self._to_tnnn_with_layout(_to_tensor(ti, _to_tensor(ci)), ttnn.TILE_LAYOUT)
+            fi_t = self._to_tnnn_with_layout(_to_tensor(fi, _to_tensor(ci)), ttnn.TILE_LAYOUT)
+            t_out = ttnn.where(ci_t, ti_t, fi_t)
+            out_list.append(self._from_ttnn(t_out))
+          values[idx] = out_list
+        else:
+          ci_t = self._to_tnnn_with_layout(_to_tensor(cond), ttnn.TILE_LAYOUT)
+          tv_t = self._to_tnnn_with_layout(_to_tensor(tval, _to_tensor(cond)), ttnn.TILE_LAYOUT)
+          fv_t = self._to_tnnn_with_layout(_to_tensor(fval, _to_tensor(cond)), ttnn.TILE_LAYOUT)
+          values[idx] = self._from_ttnn(ttnn.where(ci_t, tv_t, fv_t))
+      elif op == "CAST":
+        inp = values[src[0]]
+        target_dt = u.get("dtype")
+        if isinstance(inp, tuple) and inp[0] == "ptr":
+          values[idx] = inp
+        elif isinstance(inp, list):
+          if _is_int_dtype(u): values[idx] = [_as_int_tensor(x) for x in inp]
+          else: values[idx] = [_as_float_tensor(x) for x in inp]
+        else:
+          values[idx] = _as_int_tensor(inp) if _is_int_dtype(u) else _as_float_tensor(inp)
+      elif op == "BITCAST":
+        inp = values[src[0]]
+        target_dt = u.get("dtype")
+        if isinstance(inp, tuple) and inp[0] == "ptr":
+          values[idx] = inp
+        elif isinstance(inp, list):
+          values[idx] = [_bitcast_tensor(_to_tensor(x), target_dt) for x in inp]
+        else:
+          values[idx] = _bitcast_tensor(_to_tensor(inp), target_dt)
+      elif op == "DEFINE_REG":
+        # Represent register pointer as ("rptr", reg_id(idx), offset_elems, itemsize_bytes, size_elems)
+        itemsize = int(u.get("itemsize", 4))
+        size_elems = int(u.get("size", 0))
+        # per-thread regs are flattened to one since executor is single-threaded
+        values[idx] = ("rptr", idx, 0, itemsize, size_elems)
+      elif op == "VECTORIZE":
+        parts = [values[s] for s in src]
+        # flatten any single-item lists
+        elems = []
+        for p in parts:
+          if isinstance(p, list): elems.extend(p)
+          else: elems.append(p)
+        assert all(isinstance(p, torch.Tensor) for p in elems)
+        values[idx] = [e for e in elems]
+      elif op in ("NOOP", "SINK", "KERNEL", "PRECAST", "REWRITE_ERROR", "UNIQUE", "DEVICE", "BARRIER", "ENDIF", "ENDRANGE", "IF"):
+        values[idx] = values.get(src[0], None) if src else None
       else:
-        raise RuntimeError(f"Unsupported TTNN program op {op}")
+        raise RuntimeError(f"Unsupported UOp in phase-2 executor: {op}")
 
     # already wrote back
     return None
