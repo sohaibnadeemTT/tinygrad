@@ -129,9 +129,10 @@ class TTNNProgram:
     # Map declared tensors (in declaration order) to passed buffers
     globals_order = list(self.program.get("globals", []))
 
-    # Debug: print launch parameters
+    # Debug: print launch parameters (optional)
     import os
-    if os.environ.get("TTNN_DEBUG") == "1":
+    debug_enabled = os.environ.get("TTNN_DEBUG") == "1"
+    if debug_enabled:
       print(f"TTNN Program launch: global_size={global_size}, local_size={local_size}")
 
     # Execute ops sequentially (Phase-2: add basic addressing and shape handling)
@@ -148,14 +149,14 @@ class TTNNProgram:
     
     # If this is a matrix operation (local_size > 1), execute for each work item
     if total_work_items > 1:
-      if os.environ.get("TTNN_DEBUG") == "1":
+      if debug_enabled:
         print(f"Executing {total_work_items} work items: local_size={local_size}")
       
       # Execute the program for each work item in the local_size grid
       for lidx2 in range(local_size[2]):
         for lidx1 in range(local_size[1]):
           for lidx0 in range(local_size[0]):
-            if os.environ.get("TTNN_DEBUG") == "1":
+            if debug_enabled:
               print(f"  Work item: lidx0={lidx0}, lidx1={lidx1}, lidx2={lidx2}")
             
             # Set override values for this work item
@@ -187,6 +188,10 @@ class TTNNProgram:
     special: dict[str, int] = {"gx": global_size[0], "gy": global_size[1], "gz": global_size[2],
                                "lx": local_size[0], "ly": local_size[1], "lz": local_size[2]}
     ranges: dict[int, int] = {}
+    
+    # Debug flag for optional debugging
+    import os
+    debug_enabled = os.environ.get("TTNN_DEBUG") == "1"
 
     def _vec_count(dtype_name: Any) -> int:
       if isinstance(dtype_name, str):
@@ -237,7 +242,11 @@ class TTNNProgram:
     def _map_un(a: Any, fn) -> Any:
       if isinstance(a, list):
         return [self._from_ttnn(fn(self._to_ttnn(_to_tensor(x)))) for x in a]
-      return self._from_ttnn(fn(self._to_ttnn(_to_tensor(a))))
+      # Check if fn returns a TTNN tensor already
+      result = fn(self._to_ttnn(_to_tensor(a)))
+      if hasattr(result, 'device') and 'ttnn' in str(type(result)).lower():
+        return self._from_ttnn(result)
+      return result
 
     def _is_int_dtype(u: dict) -> bool:
       dt = u.get("dtype")
@@ -412,12 +421,10 @@ class TTNNProgram:
         _, g_arg, base_off, itemsize, size_elems = base
         offset = int(values[src[1]]) if len(src) > 1 and isinstance(values[src[1]], (int, float)) else 0
         
-        # Debug INDEX computation for work items
-        if hasattr(self, '_debug_work_item') and self._debug_work_item:
-          import os
-          if os.environ.get("TTNN_DEBUG") == "1":
-            lidx_info = getattr(self, '_lidx_override', {})
-            print(f"    INDEX: lidx={lidx_info}, src={src}, base_off={base_off}, offset={offset}, final_offset={base_off + offset}")
+        # Debug INDEX computation for work items (optional)
+        if hasattr(self, '_debug_work_item') and self._debug_work_item and debug_enabled:
+          lidx_info = getattr(self, '_lidx_override', {})
+          print(f"    INDEX: lidx={lidx_info}, src={src}, base_off={base_off}, offset={offset}, final_offset={base_off + offset}")
         
         values[idx] = ("ptr", g_arg, base_off + offset, itemsize, size_elems)
       elif op == "LOAD":
@@ -467,12 +474,10 @@ class TTNNProgram:
         end = start + nbytes
         assert end <= len(out_mv)
         
-        # Debug output for work item computation
-        if hasattr(self, '_debug_work_item') and self._debug_work_item:
-          import os
-          if os.environ.get("TTNN_DEBUG") == "1":
-            lidx_info = getattr(self, '_lidx_override', {})
-            print(f"    STORE: lidx={lidx_info}, computed={tensor.numpy()}, storing at buf[{gix if ptr[0] == 'ptr' else 'local'}][{start}:{end}] (off_elems={off_elems})")
+        # Debug output for work item computation (optional)
+        if hasattr(self, '_debug_work_item') and self._debug_work_item and debug_enabled:
+          lidx_info = getattr(self, '_lidx_override', {})
+          print(f"    STORE: lidx={lidx_info}, computed={tensor.numpy()}, storing at buf[{gix if ptr[0] == 'ptr' else 'local'}][{start}:{end}] (off_elems={off_elems})")
         
         out_mv[start:end] = memoryview(tensor.numpy().tobytes())
       elif op == "ADD":
@@ -484,12 +489,10 @@ class TTNNProgram:
             result = int(result.item())
           values[idx] = result
           
-          # Debug ADD computation for work items
-          if hasattr(self, '_debug_work_item') and self._debug_work_item:
-            import os
-            if os.environ.get("TTNN_DEBUG") == "1":
-              lidx_info = getattr(self, '_lidx_override', {})
-              print(f"    ADD: lidx={lidx_info}, a={a}, b={b}, result={result}")
+          # Debug ADD computation for work items (optional)
+          if hasattr(self, '_debug_work_item') and self._debug_work_item and debug_enabled:
+            lidx_info = getattr(self, '_lidx_override', {})
+            print(f"    ADD: lidx={lidx_info}, a={a}, b={b}, result={result}")
         else:
           values[idx] = _map_bin(a, b, lambda x,y: x + y)
       elif op == "SUB":
@@ -507,12 +510,10 @@ class TTNNProgram:
             result = int(result.item())
           values[idx] = result
           
-          # Debug MUL computation for work items
-          if hasattr(self, '_debug_work_item') and self._debug_work_item:
-            import os
-            if os.environ.get("TTNN_DEBUG") == "1":
-              lidx_info = getattr(self, '_lidx_override', {})
-              print(f"    MUL: lidx={lidx_info}, a={a}, b={b}, result={result}")
+          # Debug MUL computation for work items (optional)
+          if hasattr(self, '_debug_work_item') and self._debug_work_item and debug_enabled:
+            lidx_info = getattr(self, '_lidx_override', {})
+            print(f"    MUL: lidx={lidx_info}, a={a}, b={b}, result={result}")
         else:
           values[idx] = _map_bin(a, b, lambda x,y: ttnn.multiply(x, y))
       elif op == "FDIV":
@@ -534,6 +535,9 @@ class TTNNProgram:
       elif op == "EXP":
         a = values[src[0]]
         values[idx] = _map_un(a, lambda x: ttnn.exp(x))
+      elif op == "RECIP":
+        a = values[src[0]]
+        values[idx] = _map_un(a, lambda x: ttnn.reciprocal(self._to_tnnn_with_layout(x, ttnn.TILE_LAYOUT)))
       elif op == "WMMA":
         # Tensor core matmul: sources are A, B, and accumulator C
         # arg layout: (..., (N,M,K), dtype_in, dtype_out, ...)
