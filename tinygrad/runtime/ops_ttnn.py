@@ -6,6 +6,8 @@ from tinygrad.device import Compiled, Compiler, LRUAllocator, Buffer, BufferSpec
 from tinygrad.renderer.cstyle import CStyleLanguage
 from tinygrad.uop.ops import UOp
 from tinygrad.dtype import DType
+
+import json
 # import ttnn backend
 import ttnn
 
@@ -50,32 +52,61 @@ static inline int get_local_id(int dim) { return 0; }   // Simplified for now
         return ttnn_header + src
 
 class TTNNProgram:
-    """Simple TTNN program wrapper"""
+    """TTNN program wrapper that executes a JSON instruction array describing tensor ops."""
     def __init__(self, device: TTNNDevice, function_name: str, lib: bytes):
         self.device = device
         self.function_name = function_name
         self.lib = lib
-        # In a real implementation, you'd compile lib for TTNN
         if DEBUG >= 1:
             print(f"TTNN program '{function_name}' created with {len(lib)} bytes")
-    
-    def __call__(self, *bufs, global_size=(1,1,1), local_size=(1,1,1), vals=(), wait=False):
+
+    def execute_instruction(self, instruction: dict, tensors: dict):
+        op = instruction.get("op")
+        if op == "store":
+            # Allocate a tensor and store it in the tensors dictionary
+            tensor_info = instruction["tensor"]
+            tensor_name = tensor_info["name"]
+            size = tensor_info["size"]
+            dtype = tensor_info["dtype"]
+            tensors[tensor_name] = TTNNBuffer(size, self.device.ttnn_device) # May need to adjust this based on actual tensor creation
+            if DEBUG >= 1:
+                print(f"Allocated tensor '{tensor_name}' with size {size} and dtype {dtype}")
+        elif op == "add":
+            # Perform elementwise addition
+            a_name = instruction["inputs"][0]
+            b_name = instruction["inputs"][1]
+            out_name = instruction["output"]
+            a_tensor = tensors[a_name].tensor()
+            b_tensor = tensors[b_name].tensor()
+            out_tensor = tensors[out_name].tensor()
+            out_tensor = ttnn.add(a_tensor, b_tensor)
+            if DEBUG >= 1:
+                print(f"Performed addition: {a_name} + {b_name} -> {out_name}")
+        elif op == "if":
+            # Conditional execution
+            condition = instruction["condition"]
+            if condition:  # Replace with actual condition logic as needed
+                if DEBUG >= 1:
+                    print(f"Condition met, executing nested instructions")
+                for nested_instruction in instruction["instructions"]:
+                    self.execute_instruction(nested_instruction, tensors)
+            else:
+                if DEBUG >= 1:
+                    print(f"Condition not met, skipping nested instructions")
+        else:
+            raise ValueError(f"Unsupported operation: {op}")
+
+    def __call__(self, json_array: str, wait=False):
         """Execute the program on TTNN"""
         if DEBUG >= 2:
-            print(f"TTNN executing {self.function_name} with {len(bufs)} buffers")
-        
-        # For now, just simulate execution
-        # In a real implementation, you'd execute the compiled kernel on TTNN
-        start_time = time.time()
-        
-        # Simulate some work
-        time.sleep(0.001)  # 1ms simulation
-        
-        exec_time = time.time() - start_time
+            print(f"TTNN executing {self.function_name} with JSON array")
+        instructions = json.loads(json_array)
+        tensors = {}
+        for instruction in instructions:
+            self.execute_instruction(instruction, tensors)
         if DEBUG >= 1:
-            print(f"TTNN executed {self.function_name} in {exec_time*1000:.2f}ms")
-        
-        return exec_time if wait else None
+            print(f"TTNN program '{self.function_name}' executed successfully")
+        return None
 
 class TTNNDevice(Compiled):
     devices = []
