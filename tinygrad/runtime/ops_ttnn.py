@@ -54,7 +54,7 @@ class TTNNRenderer(Renderer):
         entry["dtype"] = dtype_name(u.dtype.base)
         entry["itemsize"] = int(u.dtype.itemsize)
         entry["size"] = int(u.dtype.size)
-      elif u.op in {Ops.LOAD, Ops.STORE, Ops.ADD, Ops.MUL, Ops.SUB, Ops.FDIV, Ops.MAX, Ops.EXP2, Ops.CAST, Ops.BITCAST}:
+      elif u.op in {Ops.LOAD, Ops.STORE, Ops.ADD, Ops.MUL, Ops.SUB, Ops.FDIV, Ops.IDIV, Ops.MAX, Ops.EXP2, Ops.CAST, Ops.BITCAST, Ops.AND, Ops.OR, Ops.XOR, Ops.SHL, Ops.SHR}:
         entry["dtype"] = dtype_name(u.dtype)
       elif u.op is Ops.CONST:
         entry["value"] = u.arg
@@ -463,6 +463,14 @@ class TTNNProgram:
         else:
           # boolean XOR via TTNN if available else NE as xor for bools
           values[idx] = _map_bin_ttnn_bool(a, b, lambda xa, xb: ttnn.logical_xor(xa, xb) if hasattr(ttnn, 'logical_xor') else ttnn.ne(xa, xb))
+      elif op == "SHL":
+        a = values[src[0]]; b = values[src[1]]
+        # Shift operations are integer-only
+        values[idx] = _map_bin_int(a, b, torch.bitwise_left_shift)
+      elif op == "SHR":
+        a = values[src[0]]; b = values[src[1]]
+        # Shift operations are integer-only
+        values[idx] = _map_bin_int(a, b, torch.bitwise_right_shift)
       elif op == "WHERE":
         cond = values[src[0]]; tval = values[src[1]]; fval = values[src[2]]
         # broadcast lane-wise if lists

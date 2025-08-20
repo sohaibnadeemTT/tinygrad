@@ -986,6 +986,13 @@ class Tensor(MathTrait):
             return any(check_sources(src) for src in u.src)
           if check_sources(uop):
             return True
+      
+      # For COPY UOps, check if they are referenced in the graph
+      if str(tensor_uop.op) == 'Ops.COPY' and len(tensor_uop.src) > 0:
+        # Check if the source of the COPY is in the graph
+        copy_source = tensor_uop.src[0]
+        return is_tensor_in_graph(copy_source)
+      
       return False
     
     tensors_need_grad: list[Tensor] = [t for tref in all_tensors if (t:=tref()) is not None and \

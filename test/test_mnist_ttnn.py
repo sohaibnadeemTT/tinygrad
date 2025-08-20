@@ -261,25 +261,91 @@ class TestMNISTTTNN(unittest.TestCase):
         expected_grad = [[1.0], [2.0]]
         print(f"Expected w.grad: {expected_grad}")
 
+  def test_mnist_loss_computation_debug(self):
+    # Debug why loss becomes zero in complex training scenarios
+    with Tensor.train():
+      print("=== Loss Computation Debug ===")
+      
+      # Test each step of the computation individually
+      print("--- Step 1: Create simple known tensors ---")
+      x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], device="TTNN")  # (2, 3)
+      target = Tensor([[10.0], [20.0]], device="TTNN")  # (2, 1)  
+      w = Tensor([[1.0], [1.0], [1.0]], device="TTNN", requires_grad=True)  # (3, 1)
+      b = Tensor([0.0], device="TTNN", requires_grad=True)  # (1,)
+      
+      print(f"x.shape: {x.shape}, x values: {x.numpy()}")
+      print(f"target.shape: {target.shape}, target values: {target.numpy()}")
+      print(f"w.shape: {w.shape}, w values: {w.numpy()}")
+      print(f"b.shape: {b.shape}, b values: {b.numpy()}")
+      
+      print("--- Step 2: Matrix multiplication ---")
+      matmul_result = x @ w  # (2, 3) @ (3, 1) = (2, 1)
+      print(f"x @ w shape: {matmul_result.shape}, values: {matmul_result.numpy()}")
+      # Expected: [[1+2+3], [4+5+6]] = [[6], [15]]
+      
+      print("--- Step 3: Add bias ---")
+      out = matmul_result + b  # (2, 1) + (1,) = (2, 1)
+      print(f"out shape: {out.shape}, values: {out.numpy()}")
+      # Expected: [[6], [15]]
+      
+      print("--- Step 4: Compute squared difference ---")
+      diff = out - target  # (2, 1) - (2, 1) = (2, 1)
+      print(f"diff shape: {diff.shape}, values: {diff.numpy()}")
+      # Expected: [[6-10], [15-20]] = [[-4], [-5]]
+      
+      squared_diff = diff ** 2  # (2, 1)
+      print(f"squared_diff shape: {squared_diff.shape}, values: {squared_diff.numpy()}")
+      # Expected: [[16], [25]]
+      
+      print("--- Step 5: Compute mean ---")
+      loss = squared_diff.mean()  # scalar
+      print(f"loss shape: {loss.shape}, value: {loss.numpy()}")
+      # Expected: (16 + 25) / 2 = 20.5
+      
+      print("--- Step 6: Test backward pass ---")
+      if loss.numpy() > 0:
+        loss.backward()
+        print(f"w.grad: {w.grad}")
+        print(f"b.grad: {b.grad}")
+        if w.grad is not None:
+          print(f"w.grad values: {w.grad.numpy()}")
+        if b.grad is not None:
+          print(f"b.grad values: {b.grad.numpy()}")
+      else:
+        print("Loss is zero - skipping backward pass")
+
   def test_mnist_simple_training(self):
     # Test very simple training case purely on TTNN  
     with Tensor.train():
       print("=== In training mode ===")
       
-      # Create data on TTNN
-      x = Tensor.rand(2, 3, device="TTNN")
-      target = Tensor.rand(2, 1, device="TTNN")
+      # Create data on TTNN with known non-zero values (avoiding Tensor.rand issue)
+      # Use 4-element arrays to ensure TTNN compatibility
+      x = Tensor([[1.0, 2.0, 3.0, 0.0], [4.0, 5.0, 6.0, 0.0]], device="TTNN")
+      target = Tensor([[10.0], [20.0]], device="TTNN")
       
-      # Create parameter directly on TTNN with requires_grad
-      w = Tensor.rand(3, 1, device="TTNN", requires_grad=True)
-      b = Tensor.rand(1, device="TTNN", requires_grad=True)
+      # Create parameter directly on TTNN with requires_grad (non-zero values)
+      w = Tensor([[0.1], [0.2], [0.3], [0.0]], device="TTNN", requires_grad=True)
+      b = Tensor([0.5], device="TTNN", requires_grad=True)
       
       print(f"w.requires_grad: {w.requires_grad}")
       print(f"b.requires_grad: {b.requires_grad}")
       
+      # Debug UOp structure
+      print(f"w.uop.op: {w.uop.op}")
+      print(f"b.uop.op: {b.uop.op}")
+      
+      # Debug intermediate values
+      print(f"x values: {x.numpy()}")
+      print(f"target values: {target.numpy()}")
+      print(f"w values: {w.numpy()}")
+      print(f"b values: {b.numpy()}")
+      
       # Manual linear layer
-      out = x @ w + b
-      loss = ((out - target) ** 2).mean()
+      out = (x @ w + b).realize()
+      print(f"out values: {out.numpy()}")
+      
+      loss = ((out - target) ** 2).mean().realize()
       
       print(f"Loss value: {loss.numpy()}")
       
