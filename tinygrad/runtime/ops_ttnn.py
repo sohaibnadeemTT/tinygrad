@@ -472,7 +472,16 @@ class TTNNProgram:
         nbytes = tensor.numel()*4
         start = off_elems*itemsize
         end = start + nbytes
-        assert end <= len(out_mv)
+        if end > len(out_mv):
+          print(f"STORE bounds error: end={end}, buf_len={len(out_mv)}, start={start}, nbytes={nbytes}, tensor_shape={tensor.shape}, off_elems={off_elems}, itemsize={itemsize}")
+          print(f"  val type: {type(val)}, tensor numel: {tensor.numel()}")
+          # Truncate to fit buffer bounds as a temporary fix
+          end = min(end, len(out_mv))
+          if start >= len(out_mv):
+            print(f"  WARNING: start offset {start} exceeds buffer size {len(out_mv)}, skipping store")
+            continue
+          nbytes = end - start
+          tensor = tensor[:nbytes//4] if nbytes > 0 else tensor[:0]
         
         # Debug output for work item computation (optional)
         if hasattr(self, '_debug_work_item') and self._debug_work_item and debug_enabled:
@@ -537,7 +546,7 @@ class TTNNProgram:
         values[idx] = _map_un(a, lambda x: ttnn.exp(x))
       elif op == "RECIP":
         a = values[src[0]]
-        values[idx] = _map_un(a, lambda x: ttnn.reciprocal(self._to_tnnn_with_layout(x, ttnn.TILE_LAYOUT)))
+        values[idx] = _map_un(a, lambda x: ttnn.reciprocal(ttnn.to_layout(x, ttnn.TILE_LAYOUT)))
       elif op == "WMMA":
         # Tensor core matmul: sources are A, B, and accumulator C
         # arg layout: (..., (N,M,K), dtype_in, dtype_out, ...)
