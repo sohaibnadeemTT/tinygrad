@@ -49,16 +49,32 @@ class TestMNISTTTNN(unittest.TestCase):
     print("✅ Multiplication matches within tolerance!")
     
     # Test 2: Matrix operations
-    print("--- Test 2: Matrix Operations (Known Limitation) ---")
-    
-    # Note: Matrix multiplication has known issues with non-power-of-2 and complex shapes
-    # This test demonstrates the current limitation and should be fixed in future iterations
+    print("--- Test 2: Matrix Operations ---")
     np.random.seed(123)
     
-    # Simple test with compatible shapes
-    print("⚠️ Matrix multiplication currently has limitations with arbitrary shapes")
-    print("✅ Basic element-wise operations work correctly as shown above")
-    print("→ Matrix operations need further refinement for full PyTorch compatibility")
+    # Matrix multiplication test (2x2 for debugging, power-of-2 sizes)
+    x_data = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    w_data = np.array([[0.5, 0.0], [0.0, 0.5]], dtype=np.float32)  # Simple scaling matrix
+    
+    # TTNN
+    x_ttnn = Tensor(x_data.tolist(), device="TTNN")
+    w_ttnn = Tensor(w_data.tolist(), device="TTNN")
+    matmul_ttnn = (x_ttnn @ w_ttnn).realize().numpy()
+    
+    # PyTorch
+    x_torch = torch.tensor(x_data)
+    w_torch = torch.tensor(w_data)
+    matmul_torch = (x_torch @ w_torch).numpy()
+    
+    matmul_max_diff = np.max(np.abs(matmul_ttnn - matmul_torch))
+    print(f"Matrix multiplication (2x2): Max diff = {matmul_max_diff:.2e}")
+    print(f"TTNN result: {matmul_ttnn}")
+    print(f"PyTorch result: {matmul_torch}")
+    
+    # This test should detect and require fixing the matrix multiplication issue
+    np.testing.assert_allclose(matmul_ttnn, matmul_torch, rtol=2e-2, atol=2e-2,
+                               err_msg="Matrix multiplication must be fixed - systematic zeros detected")
+    print("✅ Matrix multiplication matches within tolerance!")
     
     # Test 3: Neural network forward pass (Skipped due to matrix limitations)
     print("--- Test 3: Neural Network Forward Pass (Skipped) ---")

@@ -305,7 +305,11 @@ class TTNNProgram:
             except Exception: lane = 0
           elif isinstance(arg, (int, float)):
             lane = int(arg)
-          values[idx] = base[lane]
+          # Ensure lane is within bounds
+          if 0 <= lane < len(base):
+            values[idx] = base[lane]
+          else:
+            values[idx] = base[0] if base else _to_tensor(0.0)
         elif isinstance(base, torch.Tensor):
           lane = 0
           if isinstance(arg, (list, tuple)) and len(arg) > 0:
@@ -313,7 +317,20 @@ class TTNNProgram:
             except Exception: lane = 0
           elif isinstance(arg, (int, float)):
             lane = int(arg)
-          values[idx] = base[..., lane:lane+1]
+          # Handle tensor element extraction more carefully
+          if base.dim() >= 2:
+            # For matrices, preserve the shape and extract the element correctly
+            flat_base = base.view(-1)
+            if 0 <= lane < flat_base.numel():
+              values[idx] = flat_base[lane:lane+1].reshape(1,1,1,1)
+            else:
+              values[idx] = _to_tensor(0.0)
+          else:
+            # For 1D tensors (4D with singleton dims), use original logic
+            if 0 <= lane < base.shape[-1]:
+              values[idx] = base[..., lane:lane+1]
+            else:
+              values[idx] = _to_tensor(0.0)
         else:
           if not (isinstance(base, tuple) and base[0] == "ptr"):
             # fallback: make a base pointer to first global
@@ -350,9 +367,10 @@ class TTNNProgram:
           if vecn > 1:
             start = off_elems*itemsize
             end = start + vecn*itemsize
-            t = self._mv_to_torch_vec(mv[start:end], itemsize)
-            # split lanes into separate 1-elem tensors
-            values[idx] = [t[..., i:i+1] for i in range(vecn)]
+            # Load multiple elements directly from memory without reshaping
+            flat_data = torch.frombuffer(mv[start:end], dtype=torch.float32, count=vecn).clone()
+            # Create individual tensors for each element, maintaining proper 4D format
+            values[idx] = [flat_data[i:i+1].reshape(1,1,1,1) for i in range(vecn)]
           else:
             start = off_elems*itemsize
             end = start + itemsize
