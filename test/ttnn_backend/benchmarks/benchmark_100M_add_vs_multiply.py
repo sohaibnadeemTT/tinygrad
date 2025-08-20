@@ -9,7 +9,7 @@ import time
 import numpy as np
 from tinygrad import Tensor, Device
 
-def benchmark_operation(operation_name, size=50000000):
+def benchmark_operation(operation_name, size=10000000):
     """Benchmark both NumPy and TTNN for a specific operation"""
     
     print(f"\n🚀 BENCHMARKING {operation_name.upper()} - {size:,} ELEMENTS")
@@ -119,11 +119,11 @@ def benchmark_operation(operation_name, size=50000000):
     return results
 
 def main():
-    print("🚀 50M ELEMENT BENCHMARK: ADDITION vs POINTWISE MULTIPLY")
-    print("🎯 Testing TTNN vs NumPy at massive scale")
+    print("🚀 10M ELEMENT BENCHMARK: ADDITION vs POINTWISE MULTIPLY")
+    print("🎯 Testing TTNN vs NumPy at large scale")
     print("=" * 80)
     
-    size = 50000000  # 50M elements
+    size = 10000000  # 10M elements
     
     # Test Addition
     add_results = benchmark_operation("addition", size)
@@ -167,10 +167,10 @@ def main():
         print("   🎉 TTNN finally shows advantages at massive scale!")
         print("   🔥 Specialized AI hardware dominates for large tensors")
     else:
-        print("   📊 NumPy still dominates, even at 50M elements")
+        print("   📊 NumPy still dominates, even at 10M elements")
         print("   💡 TTNN overhead still significant for simple arithmetic")
     
-    print(f"\n✨ 50M ELEMENT BENCHMARK COMPLETE! ✨")
+    print(f"\n✨ 10M ELEMENT BENCHMARK COMPLETE! ✨")
 
 if __name__ == "__main__":
     main()
