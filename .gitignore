@@ -65,3 +65,4 @@ target
 tt-metal-main/
 tinygrad-artifacts/
 .ttnn_runtime_artifacts/
+MNIST_ORG/
