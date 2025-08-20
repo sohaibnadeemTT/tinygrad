@@ -129,6 +129,11 @@ class TTNNProgram:
     # Map declared tensors (in declaration order) to passed buffers
     globals_order = list(self.program.get("globals", []))
 
+    # Debug: print launch parameters
+    import os
+    if os.environ.get("TTNN_DEBUG") == "1":
+      print(f"TTNN Program launch: global_size={global_size}, local_size={local_size}")
+
     # Execute ops sequentially (Phase-2: add basic addressing and shape handling)
     globals_order = list(globals_order)
     def buf_ix_from_global_arg(arg:int) -> int:
@@ -138,7 +143,47 @@ class TTNNProgram:
     # Minimal runtime value table; entries are either scalars, torch tensors, or metadata
     values: dict[int, Any] = {}
 
-    # Simple index context for RANGE and SPECIAL (placeholders for now)
+    # For matrix operations, we need to execute for each work item in the local_size grid
+    total_work_items = local_size[0] * local_size[1] * local_size[2]
+    
+    # If this is a matrix operation (local_size > 1), execute for each work item
+    if total_work_items > 1:
+      if os.environ.get("TTNN_DEBUG") == "1":
+        print(f"Executing {total_work_items} work items: local_size={local_size}")
+      
+      # Execute the program for each work item in the local_size grid
+      for lidx2 in range(local_size[2]):
+        for lidx1 in range(local_size[1]):
+          for lidx0 in range(local_size[0]):
+            if os.environ.get("TTNN_DEBUG") == "1":
+              print(f"  Work item: lidx0={lidx0}, lidx1={lidx1}, lidx2={lidx2}")
+            
+            # Set override values for this work item
+            self._lidx_override = {"lidx0": lidx0, "lidx1": lidx1, "lidx2": lidx2}
+            self._debug_work_item = True  # Enable per-work-item debugging
+            
+            # Execute the main logic for this work item
+            self._execute_single_thread(*bufs, global_size=global_size, local_size=(1,1,1), vals=vals)
+            
+            # Clear override
+            self._lidx_override = None
+            self._debug_work_item = False
+      
+      return None
+    
+    # Execute as single thread
+    return self._execute_single_thread(*bufs, global_size=global_size, local_size=local_size, vals=vals)
+
+  def _execute_single_thread(self, *bufs, global_size:Tuple[int,int,int]=(1,1,1), local_size:Tuple[int,int,int]=(1,1,1), vals:Tuple[int, ...]=(), wait=False):
+    """Execute for a single thread"""
+    globals_order = list(self.program.get("globals", []))
+    def buf_ix_from_global_arg(arg:int) -> int:
+      return globals_order.index(arg)
+
+    uops = self.program.get("uops", [])
+    values: dict[int, Any] = {}
+    
+    # Simple index context for RANGE and SPECIAL (placeholders for single work item)
     special: dict[str, int] = {"gx": global_size[0], "gy": global_size[1], "gz": global_size[2],
                                "lx": local_size[0], "ly": local_size[1], "lz": local_size[2]}
     ranges: dict[int, int] = {}
@@ -289,8 +334,18 @@ class TTNNProgram:
       elif op == "CONST":
         values[idx] = u["value"]
       elif op == "SPECIAL":
-        # Default to zero for launch-independent replay
-        values[idx] = 0
+        # Get special operation name (e.g., "lidx0", "lidx1")
+        if isinstance(arg, list) and len(arg) >= 1:
+          special_name = arg[0]
+          # Use override value if available, otherwise default to 0
+          if hasattr(self, '_lidx_override') and self._lidx_override and special_name in self._lidx_override:
+            values[idx] = self._lidx_override[special_name]
+          elif special_name in special:
+            values[idx] = special[special_name]
+          else:
+            values[idx] = 0
+        else:
+          values[idx] = 0
       elif op == "RANGE":
         # Simple linear range up to extent (Phase-2 placeholder: single-step)
         values[idx] = 0
@@ -356,6 +411,14 @@ class TTNNProgram:
           base = ("ptr", globals_order[0], 0, 4, 0)
         _, g_arg, base_off, itemsize, size_elems = base
         offset = int(values[src[1]]) if len(src) > 1 and isinstance(values[src[1]], (int, float)) else 0
+        
+        # Debug INDEX computation for work items
+        if hasattr(self, '_debug_work_item') and self._debug_work_item:
+          import os
+          if os.environ.get("TTNN_DEBUG") == "1":
+            lidx_info = getattr(self, '_lidx_override', {})
+            print(f"    INDEX: lidx={lidx_info}, src={src}, base_off={base_off}, offset={offset}, final_offset={base_off + offset}")
+        
         values[idx] = ("ptr", g_arg, base_off + offset, itemsize, size_elems)
       elif op == "LOAD":
         # Contiguous load from a global buffer referenced by pointer expression in src[0]
@@ -403,11 +466,30 @@ class TTNNProgram:
         start = off_elems*itemsize
         end = start + nbytes
         assert end <= len(out_mv)
+        
+        # Debug output for work item computation
+        if hasattr(self, '_debug_work_item') and self._debug_work_item:
+          import os
+          if os.environ.get("TTNN_DEBUG") == "1":
+            lidx_info = getattr(self, '_lidx_override', {})
+            print(f"    STORE: lidx={lidx_info}, computed={tensor.numpy()}, storing at buf[{gix if ptr[0] == 'ptr' else 'local'}][{start}:{end}] (off_elems={off_elems})")
+        
         out_mv[start:end] = memoryview(tensor.numpy().tobytes())
       elif op == "ADD":
         a = values[src[0]]; b = values[src[1]]
         if _is_int_dtype(u):
-          values[idx] = _map_bin_int(a, b, torch.add)
+          result = _map_bin_int(a, b, torch.add)
+          # For index calculations, convert tensor results back to scalar
+          if isinstance(result, torch.Tensor) and result.numel() == 1:
+            result = int(result.item())
+          values[idx] = result
+          
+          # Debug ADD computation for work items
+          if hasattr(self, '_debug_work_item') and self._debug_work_item:
+            import os
+            if os.environ.get("TTNN_DEBUG") == "1":
+              lidx_info = getattr(self, '_lidx_override', {})
+              print(f"    ADD: lidx={lidx_info}, a={a}, b={b}, result={result}")
         else:
           values[idx] = _map_bin(a, b, lambda x,y: x + y)
       elif op == "SUB":
@@ -419,7 +501,18 @@ class TTNNProgram:
       elif op == "MUL":
         a = values[src[0]]; b = values[src[1]]
         if _is_int_dtype(u):
-          values[idx] = _map_bin_int(a, b, torch.mul)
+          result = _map_bin_int(a, b, torch.mul)
+          # For index calculations, convert tensor results back to scalar
+          if isinstance(result, torch.Tensor) and result.numel() == 1:
+            result = int(result.item())
+          values[idx] = result
+          
+          # Debug MUL computation for work items
+          if hasattr(self, '_debug_work_item') and self._debug_work_item:
+            import os
+            if os.environ.get("TTNN_DEBUG") == "1":
+              lidx_info = getattr(self, '_lidx_override', {})
+              print(f"    MUL: lidx={lidx_info}, a={a}, b={b}, result={result}")
         else:
           values[idx] = _map_bin(a, b, lambda x,y: ttnn.multiply(x, y))
       elif op == "FDIV":
