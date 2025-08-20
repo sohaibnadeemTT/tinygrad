@@ -1,0 +1,81 @@
+- mesh_workload_created:
+    mesh_workload_id: 0
+    timestamp_ns: 1755653029367866516
+- mesh_workload_add_program:
+    mesh_workload_id: 0
+    program_id: 1
+    timestamp_ns: 1755653029368089604
+    coordinates:
+      - [0, 0]
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 0
+    mesh_id: 1
+    status: InFlight
+    timestamp_ns: 1755653029932512437
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 0
+    mesh_id: 1
+    status: Committed
+    timestamp_ns: 1755653029932573206
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 0
+    mesh_id: 1
+    status: Committed
+    timestamp_ns: 1755653029932690235
+- mesh_workload_created:
+    mesh_workload_id: 1
+    timestamp_ns: 1755653029932749615
+- mesh_workload_add_program:
+    mesh_workload_id: 1
+    program_id: 3
+    timestamp_ns: 1755653029933273341
+    coordinates:
+      - [0, 0]
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 1
+    mesh_id: 1
+    status: InFlight
+    timestamp_ns: 1755653030502636302
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 1
+    mesh_id: 1
+    status: Committed
+    timestamp_ns: 1755653030502793611
+- mesh_workload_created:
+    mesh_workload_id: 2
+    timestamp_ns: 1755653030502882500
+- mesh_workload_add_program:
+    mesh_workload_id: 2
+    program_id: 5
+    timestamp_ns: 1755653030503052899
+    coordinates:
+      - [0, 0]
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 2
+    mesh_id: 1
+    status: InFlight
+    timestamp_ns: 1755653031123184119
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 2
+    mesh_id: 1
+    status: Committed
+    timestamp_ns: 1755653031123234489
+- mesh_workload_created:
+    mesh_workload_id: 3
+    timestamp_ns: 1755653031211355699
+- mesh_workload_add_program:
+    mesh_workload_id: 3
+    program_id: 7
+    timestamp_ns: 1755653031211658516
+    coordinates:
+      - [0, 0]
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 3
+    mesh_id: 1
+    status: InFlight
+    timestamp_ns: 1755653031880963890
+- mesh_workload_set_program_binary_status:
+    mesh_workload_id: 3
+    mesh_id: 1
+    status: Committed
+    timestamp_ns: 1755653031881010489

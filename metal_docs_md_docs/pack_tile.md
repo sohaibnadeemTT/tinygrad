@@ -1,0 +1,8 @@
+# pack_tile
+
+### pack_tile(uint32_t idst, uint32_t cbid, std::uint32_t output_tile_index = 0)
+
+*Function documentation*
+### matmul_pack_tile(uint32_t ifrom_dst, uint32_t icb, uint32_t ntiles)
+
+*Function documentation*
