@@ -63,3 +63,5 @@ profile_stats
 target
 .mypy_cache
 tt-metal-main/
+tinygrad-artifacts/
+.ttnn_runtime_artifacts/

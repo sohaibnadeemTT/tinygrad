@@ -954,8 +954,42 @@ class Tensor(MathTrait):
     ```
     """
     all_uops = self.uop.toposort()
+    
+    # Helper function to check if a tensor's UOp is referenced in the computation graph
+    def is_tensor_in_graph(tensor_uop):
+      if tensor_uop in all_uops:
+        return True
+      
+      # For VIEW UOps that reference BUFFER, check if the same BUFFER is referenced in the graph
+      if str(tensor_uop.op) == 'Ops.VIEW' and len(tensor_uop.src) > 0:
+        tensor_buffer = tensor_uop.src[0]  # The underlying BUFFER
+        if str(tensor_buffer.op) == 'Ops.BUFFER':
+          # Check if any UOp in the graph references the same BUFFER
+          for uop in all_uops:
+            def check_same_buffer(u):
+              if u == tensor_buffer:
+                return True
+              if str(u.op) == 'Ops.VIEW' and len(u.src) > 0:
+                if u.src[0] == tensor_buffer:
+                  return True
+              return any(check_same_buffer(src) for src in u.src)
+            if check_same_buffer(uop):
+              return True
+      
+      # For BUFFER UOps, check if they are referenced by any UOp in the graph
+      if str(tensor_uop.op) == 'Ops.BUFFER':
+        for uop in all_uops:
+          # Recursively check all source UOps
+          def check_sources(u):
+            if u == tensor_uop:
+              return True
+            return any(check_sources(src) for src in u.src)
+          if check_sources(uop):
+            return True
+      return False
+    
     tensors_need_grad: list[Tensor] = [t for tref in all_tensors if (t:=tref()) is not None and \
-                                       t.uop in all_uops and t.requires_grad]
+                                       is_tensor_in_graph(t.uop) and t.requires_grad]
     # clear contexts
     for t,g in zip(tensors_need_grad, self.gradient(*tensors_need_grad, gradient=gradient, materialize_grads=True)):
       assert g.shape == t.shape, f"grad shape must match tensor shape, {g.shape!r} != {t.shape!r}"

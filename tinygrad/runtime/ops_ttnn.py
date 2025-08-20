@@ -85,11 +85,27 @@ class TTNNProgram:
     self.device = device
     self.name = name
     self.program = json.loads(lib.decode('utf-8'))
+    
+    # Always log program factory JSON to tinygrad-artifacts
     try:
-      import os
+      import os, time
+      artifacts_dir = "tinygrad-artifacts"
+      os.makedirs(artifacts_dir, exist_ok=True)
+      
+      # Create unique filename with timestamp
+      timestamp = int(time.time() * 1000)
+      json_filename = os.path.join(artifacts_dir, f"ttnn_program_{self.name}_{timestamp}.json")
+      
+      with open(json_filename, 'w') as f:
+        json.dump(self.program, f, indent=2)
+      
+      print(f"TTNN Program Factory saved to: {json_filename}")
+      
+      # Also print to console if debug is enabled
       if os.environ.get("TTNN_DEBUG") == "1":
         print("TTNN IR:", json.dumps(self.program, indent=2))
-    except Exception:
+    except Exception as e:
+      print(f"Warning: Could not save program factory to disk: {e}")
       pass
 
   def _mv_to_torch_vec(self, mv:memoryview, dtype_bytes:int) -> torch.Tensor:
@@ -499,12 +515,13 @@ class TTNNProgram:
         values[idx] = ("rptr", idx, 0, itemsize, size_elems)
       elif op == "VECTORIZE":
         parts = [values[s] for s in src]
-        # flatten any single-item lists
+        # flatten any single-item lists and ensure all are tensors
         elems = []
         for p in parts:
-          if isinstance(p, list): elems.extend(p)
-          else: elems.append(p)
-        assert all(isinstance(p, torch.Tensor) for p in elems)
+          if isinstance(p, list): 
+            elems.extend([_to_tensor(x) if not isinstance(x, torch.Tensor) else x for x in p])
+          else: 
+            elems.append(_to_tensor(p) if not isinstance(p, torch.Tensor) else p)
         values[idx] = [e for e in elems]
       elif op in ("NOOP", "SINK", "KERNEL", "PRECAST", "REWRITE_ERROR", "UNIQUE", "DEVICE", "BARRIER", "ENDIF", "ENDRANGE", "IF"):
         values[idx] = values.get(src[0], None) if src else None
