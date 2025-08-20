@@ -150,6 +150,8 @@ def test_addition_performance():
         print("   ✗ Large tensor addition FAILED!")
         return False
 
+
+
 if __name__ == "__main__":
     print("Testing TTNN backend addition operations...")
     
@@ -166,10 +168,12 @@ if __name__ == "__main__":
     print(f"Multiplication: {'PASSED' if test3 else 'FAILED'}")
     print(f"Performance: {'PASSED' if test4 else 'FAILED'}")
     print("=" * 60)
+    print("\n📝 Note: For stress testing with large tensors, run test_stress.py")
     
     all_passed = test1 and test2 and test3 and test4
     if all_passed:
-        print("🎉 All addition tests PASSED!")
+        print("🎉 ALL basic addition tests PASSED!")
+        print("🚀 Vectorization working from small to medium tensors!")
     else:
         print("❌ Some addition tests FAILED!")
         print("\nNote: Results of [0.0, 0.0, 0.0] indicate kernel computation issues.")
