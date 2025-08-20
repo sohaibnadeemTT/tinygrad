@@ -238,6 +238,18 @@ class TTNNProgram:
         return [self._from_ttnn(combiner(to_bool_ttnn(a), to_bool_ttnn(y))) for y in b]
       return self._from_ttnn(combiner(to_bool_ttnn(a), to_bool_ttnn(b)))
 
+    def _coerce_to_single_tensor(val: Any) -> torch.Tensor:
+      if isinstance(val, list):
+        parts = [x if isinstance(x, torch.Tensor) else _to_tensor(x) for x in val]
+        return torch.cat([p.reshape(1,1,1,-1) for p in parts], dim=-1)
+      return val if isinstance(val, torch.Tensor) else _to_tensor(val)
+
+    def _as_2d(val: Any, shape: tuple[int,int]) -> torch.Tensor:
+      t = _coerce_to_single_tensor(val).reshape(-1)
+      m, n = shape
+      assert t.numel() == m*n, f"WMMA shape mismatch: expected {m*n} elems got {t.numel()}"
+      return t.reshape(m, n).contiguous()
+
     # local/register scratch storage keyed by defining uop index
     local_store: dict[int, memoryview] = {}
 
@@ -391,6 +403,24 @@ class TTNNProgram:
       elif op == "EXP":
         a = values[src[0]]
         values[idx] = _map_un(a, lambda x: ttnn.exp(x))
+      elif op == "WMMA":
+        # Tensor core matmul: sources are A, B, and accumulator C
+        # arg layout: (..., (N,M,K), dtype_in, dtype_out, ...)
+        dims = u.get("arg", None)
+        assert isinstance(dims, (list, tuple)) and len(dims) >= 2, "WMMA arg malformed"
+        N, M, K = dims[1]
+        a_val = values[src[0]]
+        b_val = values[src[1]]
+        c_val = values[src[2]] if len(src) > 2 else None
+        A2 = _as_2d(a_val, (M, K))
+        B2 = _as_2d(b_val, (K, N))
+        ttA = self._to_ttnn(A2)
+        ttB = self._to_ttnn(B2)
+        ttC = ttnn.matmul(ttA, ttB)
+        if c_val is not None:
+          C2 = _as_2d(c_val, (M, N))
+          ttC = ttnn.add(ttC, self._to_ttnn(C2))
+        values[idx] = self._from_ttnn(ttC)
       elif op == "CMPLT":
         a = values[src[0]]; b = values[src[1]]
         values[idx] = _map_bin(a, b, lambda x,y: ttnn.lt(x, y))
